@@ -39,12 +39,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if not message_content:
             return
         
-        # Check if user is a client (only clients can send messages)
-        if self.user.user_type != 'client':
+        # Allow both client and employee to send messages
+        if self.user.user_type not in ['client', 'employee']:
             print(f"WebSocket receive - Access denied: User {self.user} (type: {self.user.user_type}) cannot send messages")
             await self.send(text_data=json.dumps({
                 'type': 'error',
-                'message': 'Only clients can send messages in the chat.'
+                'message': 'Only clients and employees can send messages in the chat.'
             }))
             return
         
