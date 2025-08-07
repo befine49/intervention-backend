@@ -35,7 +35,31 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def receive(self, text_data):
         data = json.loads(text_data)
         message_content = data.get('message', '').strip()
-        
+
+        # Employee can end chat by sending a special command
+        if self.user.user_type == 'employee' and data.get('action') == 'end_chat':
+            await self.end_chat()
+            await self.channel_layer.group_send(
+                self.room_group_name,
+                {
+                    'type': 'chat_message',
+                    'message': 'Chat has been ended by the employee.',
+                    'user': self.user.username,
+                    'timestamp': '',
+                    'user_id': self.user.id,
+                    'message_type': 'system_message',
+                    'user_type': self.user.user_type
+                }
+            )
+            # Close the WebSocket connection for all users in the group
+            await self.channel_layer.group_send(
+                self.room_group_name,
+                {
+                    'type': 'close_chat_channel'
+                }
+            )
+            return
+
         if not message_content:
             return
         
@@ -76,6 +100,21 @@ class ChatConsumer(AsyncWebsocketConsumer):
             'user_type': event['user_type']
         }))
 
+    async def close_chat_channel(self, event):
+        # Send a message to the frontend to trigger rating for client, redirect for employee
+        user_type = getattr(self.user, 'user_type', None)
+        if user_type == 'client':
+            await self.send(text_data=json.dumps({
+                'type': 'close_chat_channel',
+                'show_rating': True
+            }))
+        else:
+            await self.send(text_data=json.dumps({
+                'type': 'close_chat_channel',
+                'show_rating': False
+            }))
+        await self.close()
+
     @database_sync_to_async
     def can_access_intervention(self):
         try:
@@ -94,3 +133,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
             user=self.user,
             content=content
         )
+
+    @database_sync_to_async
+    def end_chat(self):
+        intervention = Intervention.objects.get(id=self.room_name)
+        intervention.end_chat_by_employee()

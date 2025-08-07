@@ -38,6 +38,8 @@ class Intervention(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
+    chat_ended_by_employee = models.BooleanField(default=False)
+    chat_ended_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.title} ({self.status})"
@@ -46,6 +48,12 @@ class Intervention(models.Model):
         """Get available employees who can handle this intervention"""
         from authentication.models import User
         return User.objects.filter(user_type__in=['employee', 'admin'])
+
+    def end_chat_by_employee(self):
+        from django.utils import timezone
+        self.chat_ended_by_employee = True
+        self.chat_ended_at = timezone.now()
+        self.save()
 
 class Message(models.Model):
     MESSAGE_TYPE_CHOICES = [
