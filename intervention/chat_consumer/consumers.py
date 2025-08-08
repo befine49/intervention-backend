@@ -36,6 +36,28 @@ class ChatConsumer(AsyncWebsocketConsumer):
         data = json.loads(text_data)
         message_content = data.get('message', '').strip()
 
+        # Get intervention instance
+        intervention = await self.get_intervention()
+
+        # Prevent sending messages if intervention is closed
+        if intervention and getattr(intervention, 'status', None) == 'closed':
+            await self.send(text_data=json.dumps({
+                'type': 'error',
+                'message': 'Chat is closed. No more messages can be sent.'
+            }))
+            return
+
+        # Handle client rating after chat closed
+        if intervention and intervention.status == 'closed' and self.user.user_type == 'client' and data.get('action') == 'rate_chat':
+            rating = data.get('rating')
+            if rating:
+                await self.save_rating(intervention.id, rating)
+                await self.send(text_data=json.dumps({
+                    'type': 'system',
+                    'message': f'Thank you for rating this chat: {rating} stars.'
+                }))
+            return
+
         # Employee can end chat by sending a special command
         if self.user.user_type == 'employee' and data.get('action') == 'end_chat':
             await self.end_chat()
@@ -62,7 +84,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         if not message_content:
             return
-        
+
         # Allow both client and employee to send messages
         if self.user.user_type not in ['client', 'employee']:
             print(f"WebSocket receive - Access denied: User {self.user} (type: {self.user.user_type}) cannot send messages")
@@ -71,10 +93,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 'message': 'Only clients and employees can send messages in the chat.'
             }))
             return
-        
+
         # Save message to database
         saved_message = await self.save_message(message_content)
-        
+
         # Send message to group
         await self.channel_layer.group_send(
             self.room_group_name,
@@ -138,3 +160,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
     def end_chat(self):
         intervention = Intervention.objects.get(id=self.room_name)
         intervention.end_chat_by_employee()
+        # Mark intervention as closed after chat ends
+        intervention.status = 'closed'
+        intervention.save()
+
+    @database_sync_to_async
+    def get_intervention(self):
+        try:
+            return Intervention.objects.get(id=self.room_name)
+        except Intervention.DoesNotExist:
+            return None
+
+    @database_sync_to_async
+    def save_rating(self, intervention_id, rating):
+        intervention = Intervention.objects.get(id=intervention_id)
+        intervention.chat_rating = rating
+        intervention.save()
