@@ -3,8 +3,71 @@ from channels.db import database_sync_to_async
 from django.contrib.auth.models import AnonymousUser
 from intervention_app.models import Intervention, Message
 import json
+from channels.layers import get_channel_layer
+from django.db import models
 
-class ChatConsumer(AsyncWebsocketConsumer):
+class InterventionMixin:
+    @database_sync_to_async
+    def get_intervention(self):
+        try:
+            return Intervention.objects.get(id=self.room_name)
+        except Intervention.DoesNotExist:
+            return None
+
+    @database_sync_to_async
+    def save_message(self, content):
+        intervention = Intervention.objects.get(id=self.room_name)
+        # Set message type based on user type
+        if self.user.is_employee():
+            message_type = 'employee_message'
+        else:
+            message_type = 'client_message'
+            
+        return Message.objects.create(
+            intervention=intervention,
+            user=self.user,
+            content=content,
+            message_type=message_type
+        )
+
+    @database_sync_to_async
+    def get_room_participant_user_ids_excluding_sender(self):
+        try:
+            intervention = Intervention.objects.get(id=self.room_name)
+            # Include both creator and assigned employee
+            participant_ids = {intervention.created_by_id}
+            if intervention.assigned_to_id:
+                participant_ids.add(intervention.assigned_to_id)
+            
+            # Remove current sender from recipients
+            if self.user and self.user.id in participant_ids:
+                participant_ids.discard(self.user.id)
+                
+            return list(participant_ids)
+        except Intervention.DoesNotExist:
+            return []
+
+class ChatConsumer(AsyncWebsocketConsumer, InterventionMixin):
+    @database_sync_to_async
+    def can_access_intervention(self):
+        try:
+            intervention = Intervention.objects.get(id=self.room_name)
+            # Allow only the creator or assigned employee/admin to access
+            if not self.user.is_authenticated:
+                return False
+            
+            # Check if user is admin or employee
+            if self.user.user_type in ['admin', 'employee']:
+                return True
+                
+            # For clients, check if they created the intervention
+            allowed_ids = [intervention.created_by_id]
+            if intervention.assigned_to_id:
+                allowed_ids.append(intervention.assigned_to_id)
+            return self.user.id in allowed_ids
+        except Intervention.DoesNotExist:
+            return False
+        
     async def connect(self):
         self.room_name = self.scope['url_route']['kwargs']['room_name']
         self.room_group_name = f"chat_{self.room_name}"
@@ -52,10 +115,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
             rating = data.get('rating')
             if rating:
                 await self.save_rating(intervention.id, rating)
-                await self.send(text_data=json.dumps({
-                    'type': 'system',
-                    'message': f'Thank you for rating this chat: {rating} stars.'
-                }))
+            await self.send(text_data=json.dumps({
+                'type': 'system',
+                'message': f'Thank you for rating this chat: {rating} stars.'
+            }))
             return
 
         # Employee can end chat by sending a special command
@@ -111,6 +174,28 @@ class ChatConsumer(AsyncWebsocketConsumer):
             }
         )
 
+        # Also send a lightweight notification event to the recipient user's personal group
+        try:
+            channel_layer = get_channel_layer()
+            # Determine target users in this room besides the sender
+            recipient_user_ids = await self.get_room_participant_user_ids_excluding_sender()
+            for rid in recipient_user_ids:
+                await channel_layer.group_send(
+                    f"user_{rid}",
+                    {
+                        'type': 'notify_event',
+                        'event': 'new_message',
+                        'intervention_id': self.room_name,
+                        'from_user': saved_message.user.username,
+                        'message': saved_message.content,
+                        'timestamp': saved_message.timestamp.isoformat(),
+                        'title': (await self.get_intervention()).title if await self.get_intervention() else f"Intervention {self.room_name}",
+                    }
+                )
+        except Exception as e:
+            # best-effort; don't disrupt chat
+            print(f"Notify event failed: {e}")
+
     async def chat_message(self, event):
         await self.send(text_data=json.dumps({
             'type': 'chat',
@@ -138,6 +223,47 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.close()
 
     @database_sync_to_async
+    def get_intervention(self):
+        try:
+            return Intervention.objects.get(id=self.room_name)
+        except Intervention.DoesNotExist:
+            return None
+
+class UserNotificationConsumer(AsyncWebsocketConsumer, InterventionMixin):
+    async def connect(self):
+        self.user = self.scope.get('user', AnonymousUser())
+        if not getattr(self.user, 'is_authenticated', False):
+            await self.close()
+            return
+        self.group_name = f"user_{self.user.id}"
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        if hasattr(self, 'group_name'):
+            await self.channel_layer.group_discard(self.group_name, self.channel_name)
+
+    async def notify_event(self, event):
+        await self.send(text_data=json.dumps(event))
+
+    @database_sync_to_async
+    def get_room_participant_user_ids_excluding_sender(self):
+        try:
+            intervention = Intervention.objects.get(id=self.room_name)
+            # Include both creator and assigned employee
+            participant_ids = {intervention.created_by_id}
+            if intervention.assigned_to_id:
+                participant_ids.add(intervention.assigned_to_id)
+            
+            # Remove current sender from recipients
+            if self.user and self.user.id in participant_ids:
+                participant_ids.discard(self.user.id)
+                
+            return list(participant_ids)
+        except Intervention.DoesNotExist:
+            return []
+
+    @database_sync_to_async
     def can_access_intervention(self):
         try:
             intervention = Intervention.objects.get(id=self.room_name)
@@ -150,10 +276,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def save_message(self, content):
         intervention = Intervention.objects.get(id=self.room_name)
+        # Set message type based on user type
+        if self.user.is_employee():
+            message_type = 'employee_message'
+        else:
+            message_type = 'client_message'
+            
         return Message.objects.create(
             intervention=intervention,
             user=self.user,
-            content=content
+            content=content,
+            message_type=message_type
         )
 
     @database_sync_to_async

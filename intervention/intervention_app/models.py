@@ -40,6 +40,7 @@ class Intervention(models.Model):
     resolved_at = models.DateTimeField(null=True, blank=True)
     chat_ended_by_employee = models.BooleanField(default=False)
     chat_ended_at = models.DateTimeField(null=True, blank=True)
+    chat_rating = models.IntegerField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.title} ({self.status})"

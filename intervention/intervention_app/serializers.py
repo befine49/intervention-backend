@@ -32,7 +32,8 @@ class InterventionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'description', 'problem_type', 'priority', 'priority_display',
             'assigned_to', 'created_by', 'status', 'status_display', 
-            'created_at', 'updated_at', 'messages', 'available_employees'
+            'created_at', 'updated_at', 'messages', 'available_employees',
+            'chat_ended_by_employee', 'chat_ended_at', 'chat_rating'
         ]
     
     def get_available_employees(self, obj):
